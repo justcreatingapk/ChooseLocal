@@ -1,0 +1,572 @@
+name: Build ChooseLocal APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Create Android project
+        shell: bash
+        run: |
+          mkdir -p app/src/main/java/app/chooselocal
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = 'ChooseLocal'
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'app.chooselocal'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'app.chooselocal'
+                  minSdk 23
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0'
+              }
+          }
+
+          dependencies {
+              implementation 'org.jmdns:jmdns:3.6.3'
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+              <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+              <uses-feature
+                  android:name="android.software.leanback"
+                  android:required="false" />
+
+              <uses-feature
+                  android:name="android.hardware.touchscreen"
+                  android:required="false" />
+
+              <application
+                  android:allowBackup="false"
+                  android:label="ChooseLocal"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                      </intent-filter>
+
+                  </activity>
+
+              </application>
+
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/app/chooselocal/MainActivity.java <<'EOF'
+          package app.chooselocal;
+
+          import android.app.Activity;
+          import android.content.SharedPreferences;
+          import android.graphics.Typeface;
+          import android.net.wifi.WifiManager;
+          import android.os.Bundle;
+          import android.text.InputType;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          import java.net.Inet4Address;
+          import java.net.InetAddress;
+          import java.net.NetworkInterface;
+          import java.util.Collections;
+          import java.util.Locale;
+
+          import javax.jmdns.JmDNS;
+          import javax.jmdns.ServiceInfo;
+
+          public class MainActivity extends Activity {
+
+              private EditText hostnameInput;
+              private TextView status;
+              private Button startButton;
+              private Button stopButton;
+
+              private JmDNS jmDNS;
+              private ServiceInfo serviceInfo;
+              private WifiManager.MulticastLock multicastLock;
+
+              private SharedPreferences prefs;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  prefs = getSharedPreferences(
+                      "chooselocal",
+                      MODE_PRIVATE
+                  );
+
+                  buildInterface();
+              }
+
+              private void buildInterface() {
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(50, 45, 50, 45);
+                  root.setGravity(Gravity.CENTER_HORIZONTAL);
+
+                  TextView title = new TextView(this);
+                  title.setText("ChooseLocal");
+                  title.setTextSize(34);
+                  title.setTypeface(null, Typeface.BOLD);
+                  title.setGravity(Gravity.CENTER);
+
+                  TextView subtitle = new TextView(this);
+                  subtitle.setText(
+                      "Choose a .local hostname for this Android device."
+                  );
+                  subtitle.setTextSize(18);
+                  subtitle.setGravity(Gravity.CENTER);
+                  subtitle.setPadding(0, 15, 0, 35);
+
+                  hostnameInput = new EditText(this);
+                  hostnameInput.setHint("room101-tv1");
+                  hostnameInput.setSingleLine(true);
+                  hostnameInput.setTextSize(22);
+                  hostnameInput.setInputType(
+                      InputType.TYPE_CLASS_TEXT |
+                      InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                  );
+
+                  String saved =
+                      prefs.getString("hostname", "");
+
+                  hostnameInput.setText(saved);
+
+                  TextView localSuffix = new TextView(this);
+                  localSuffix.setText(".local");
+                  localSuffix.setTextSize(20);
+                  localSuffix.setGravity(Gravity.CENTER);
+                  localSuffix.setPadding(0, 5, 0, 30);
+
+                  startButton = new Button(this);
+                  startButton.setText("START");
+                  startButton.setTextSize(20);
+
+                  stopButton = new Button(this);
+                  stopButton.setText("STOP");
+                  stopButton.setTextSize(20);
+                  stopButton.setEnabled(false);
+
+                  status = new TextView(this);
+                  status.setText(
+                      "Not running.\n\nEnter a hostname and press START."
+                  );
+                  status.setTextSize(18);
+                  status.setGravity(Gravity.CENTER);
+                  status.setPadding(0, 35, 0, 0);
+
+                  root.addView(title);
+                  root.addView(subtitle);
+                  root.addView(hostnameInput);
+                  root.addView(localSuffix);
+                  root.addView(startButton);
+                  root.addView(stopButton);
+                  root.addView(status);
+
+                  setContentView(root);
+
+                  startButton.setOnClickListener(
+                      v -> startResponder()
+                  );
+
+                  stopButton.setOnClickListener(
+                      v -> stopResponder()
+                  );
+              }
+
+              private void startResponder() {
+
+                  String raw =
+                      hostnameInput.getText()
+                          .toString()
+                          .trim()
+                          .toLowerCase(Locale.US);
+
+                  if (raw.endsWith(".local")) {
+                      raw = raw.substring(
+                          0,
+                          raw.length() - 6
+                      );
+                  }
+
+                  final String hostname =
+                      sanitizeHostname(raw);
+
+                  if (hostname.isEmpty()) {
+                      status.setText(
+                          "Please enter a valid hostname."
+                      );
+                      return;
+                  }
+
+                  hostnameInput.setText(hostname);
+
+                  prefs.edit()
+                      .putString("hostname", hostname)
+                      .apply();
+
+                  startButton.setEnabled(false);
+                  hostnameInput.setEnabled(false);
+
+                  status.setText(
+                      "Starting " +
+                      hostname +
+                      ".local ..."
+                  );
+
+                  new Thread(() -> {
+
+                      try {
+
+                          InetAddress address =
+                              findLocalIPv4();
+
+                          if (address == null) {
+                              showError(
+                                  "No local IPv4 address found."
+                              );
+                              return;
+                          }
+
+                          WifiManager wifi =
+                              (WifiManager)
+                                  getApplicationContext()
+                                      .getSystemService(
+                                          WIFI_SERVICE
+                                      );
+
+                          multicastLock =
+                              wifi.createMulticastLock(
+                                  "ChooseLocal-mDNS"
+                              );
+
+                          multicastLock
+                              .setReferenceCounted(false);
+
+                          multicastLock.acquire();
+
+                          jmDNS = JmDNS.create(
+                              address,
+                              hostname
+                          );
+
+                          serviceInfo =
+                              ServiceInfo.create(
+                                  "_http._tcp.local.",
+                                  hostname,
+                                  8080,
+                                  "ChooseLocal"
+                              );
+
+                          jmDNS.registerService(
+                              serviceInfo
+                          );
+
+                          final String ip =
+                              address.getHostAddress();
+
+                          runOnUiThread(() -> {
+
+                              status.setText(
+                                  "ACTIVE\n\n" +
+                                  hostname +
+                                  ".local\n\n" +
+                                  "IP: " +
+                                  ip +
+                                  "\n\n" +
+                                  "HTTP service: 8080"
+                              );
+
+                              stopButton
+                                  .setEnabled(true);
+                          });
+
+                      } catch (Exception e) {
+
+                          showError(
+                              e.getClass()
+                                  .getSimpleName() +
+                              "\n\n" +
+                              String.valueOf(
+                                  e.getMessage()
+                              )
+                          );
+                      }
+
+                  }).start();
+              }
+
+              private String sanitizeHostname(
+                  String value
+              ) {
+
+                  if (value == null) {
+                      return "";
+                  }
+
+                  value = value
+                      .toLowerCase(Locale.US)
+                      .replaceAll(
+                          "[^a-z0-9-]",
+                          "-"
+                      )
+                      .replaceAll(
+                          "-+",
+                          "-"
+                      );
+
+                  while (
+                      value.startsWith("-")
+                  ) {
+                      value =
+                          value.substring(1);
+                  }
+
+                  while (
+                      value.endsWith("-")
+                  ) {
+                      value =
+                          value.substring(
+                              0,
+                              value.length() - 1
+                          );
+                  }
+
+                  if (value.length() > 63) {
+                      value =
+                          value.substring(0, 63);
+                  }
+
+                  return value;
+              }
+
+              private void stopResponder() {
+
+                  stopButton.setEnabled(false);
+
+                  new Thread(() -> {
+
+                      closeMdns();
+
+                      runOnUiThread(() -> {
+
+                          status.setText(
+                              "Stopped.\n\n" +
+                              "Choose another hostname " +
+                              "or press START again."
+                          );
+
+                          hostnameInput
+                              .setEnabled(true);
+
+                          startButton
+                              .setEnabled(true);
+                      });
+
+                  }).start();
+              }
+
+              private void showError(
+                  String message
+              ) {
+
+                  closeMdns();
+
+                  runOnUiThread(() -> {
+
+                      status.setText(
+                          "ERROR\n\n" +
+                          message
+                      );
+
+                      hostnameInput
+                          .setEnabled(true);
+
+                      startButton
+                          .setEnabled(true);
+
+                      stopButton
+                          .setEnabled(false);
+                  });
+              }
+
+              private InetAddress findLocalIPv4() {
+
+                  try {
+
+                      for (
+                          NetworkInterface network :
+                          Collections.list(
+                              NetworkInterface
+                                  .getNetworkInterfaces()
+                          )
+                      ) {
+
+                          if (
+                              !network.isUp() ||
+                              network.isLoopback()
+                          ) {
+                              continue;
+                          }
+
+                          for (
+                              InetAddress address :
+                              Collections.list(
+                                  network
+                                      .getInetAddresses()
+                              )
+                          ) {
+
+                              if (
+                                  address instanceof
+                                      Inet4Address &&
+                                  !address
+                                      .isLoopbackAddress() &&
+                                  address
+                                      .isSiteLocalAddress()
+                              ) {
+                                  return address;
+                              }
+                          }
+                      }
+
+                  } catch (
+                      Exception ignored
+                  ) {
+                  }
+
+                  return null;
+              }
+
+              private void closeMdns() {
+
+                  try {
+                      if (
+                          jmDNS != null &&
+                          serviceInfo != null
+                      ) {
+                          jmDNS.unregisterService(
+                              serviceInfo
+                          );
+                      }
+                  } catch (
+                      Exception ignored
+                  ) {
+                  }
+
+                  try {
+                      if (jmDNS != null) {
+                          jmDNS.close();
+                      }
+                  } catch (
+                      Exception ignored
+                  ) {
+                  }
+
+                  jmDNS = null;
+                  serviceInfo = null;
+
+                  try {
+                      if (
+                          multicastLock != null &&
+                          multicastLock.isHeld()
+                      ) {
+                          multicastLock.release();
+                      }
+                  } catch (
+                      Exception ignored
+                  ) {
+                  }
+
+                  multicastLock = null;
+              }
+
+              @Override
+              protected void onDestroy() {
+                  closeMdns();
+                  super.onDestroy();
+              }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle :app:assembleDebug
+
+      - name: Prepare APK
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk ChooseLocal.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChooseLocal-apk
+          path: ChooseLocal.apk
